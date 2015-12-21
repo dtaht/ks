@@ -51,11 +51,7 @@
 #include <net/netlink.h>
 #include <linux/version.h>
 #include "pkt_sched.h"
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 2, 0)
-#include <net/flow_keys.h>
-#else
 #include <net/flow_dissector.h>
-#endif
 #include "codel5.h"
 
 /* The CAKE Principles:
@@ -99,10 +95,10 @@
  * a priority-based weight (high) or a bandwidth-based weight
  * (low) is used for that tin in the current pass.
  *
- * This qdisc incorporates much of Eric Dumazet's fq_codel code, which
- * he kindly granted us permission to use, which we customised for use as an
- * integrated subordinate.  See sch_fq_codel.c for details of
- * operation.
+ * This qdisc incorporates much of Eric Dumazet's fq_codel
+ * code, which he kindly granted us permission to use, which
+ * we customised for use as an integrated subordinate.
+ * See sch_fq_codel.c for details of operation.
  */
 
 #define CAKE_SET_WAYS (8)
@@ -230,60 +226,38 @@ enum {
 	CAKE_FLOW_DST_IP,
 	CAKE_FLOW_HOSTS,    /* = CAKE_FLOW_SRC_IP | CAKE_FLOW_DST_IP */
 	CAKE_FLOW_FLOWS,
-	CAKE_FLOW_DUAL_SRC, /* = CAKE_FLOW_SRC_IP | CAKE_FLOW_FLOWS */
-	CAKE_FLOW_DUAL_DST, /* = CAKE_FLOW_DST_IP | CAKE_FLOW_FLOWS */
-	CAKE_FLOW_DUAL,     /* = CAKE_FLOW_HOSTS  | CAKE_FLOW_FLOWS */
+	CAKE_FLOW_DUAL = 8,     /* */
+	CAKE_FLOW_DUAL_SRC = 9, /* = CAKE_FLOW_SRC_IP | CAKE_FLOW_DUAL */
+	CAKE_FLOW_DUAL_DST = 10, /* = CAKE_FLOW_DST_IP | CAKE_FLOW_DUAL */
 	CAKE_FLOW_MAX
 };
+
+#define CAKE_NORMAL (CAKE_FLOW_SRC_IP | CAKE_FLOW_DST_IP)
 
 static inline u32
 cake_hash(struct cake_tin_data *q, const struct sk_buff *skb, int flow_mode)
 {
-#if KERNEL_VERSION(4, 2, 0) > LINUX_VERSION_CODE
-	struct flow_keys keys;
-#else
 	struct flow_keys keys, host_keys;
-#endif
 	u32 flow_hash, host_hash, reduced_hash;
 
 	if (unlikely(flow_mode == CAKE_FLOW_NONE ||
 		     q->flows_cnt < CAKE_SET_WAYS))
 		return 0;
 
-#if KERNEL_VERSION(4, 2, 0) > LINUX_VERSION_CODE
-	skb_flow_dissect(skb, &keys);
+	//skb_flow_dissect_flow_keys(skb, &keys,
+	//			FLOW_DISSECTOR_F_STOP_AT_FLOW_LABEL);
 
-	host_hash = jhash_3words(
-		(__force u32)((flow_mode & CAKE_FLOW_DST_IP) ? keys.dst : 0),
-		(__force u32)((flow_mode & CAKE_FLOW_SRC_IP) ? keys.src : 0),
-		(__force u32)0, q->perturbation);
-
-	if (!(flow_mode & CAKE_FLOW_FLOWS))
-		flow_hash = host_hash;
-	else
-		flow_hash = jhash_3words(
-			(__force u32)keys.dst,
-			(__force u32)keys.src ^ keys.ip_proto,
-			(__force u32)keys.ports, q->perturbation);
-
-#else
-
-/* Linux kernel 4.2.x have skb_flow_dissect_flow_keys which takes only 2
- * arguments
- */
-#if (KERNEL_VERSION(4, 2, 0) <= LINUX_VERSION_CODE) && (KERNEL_VERSION(4, 3, 0) >  LINUX_VERSION_CODE)
 	skb_flow_dissect_flow_keys(skb, &keys);
-#else
-	skb_flow_dissect_flow_keys(skb, &keys,
-				FLOW_DISSECTOR_F_STOP_AT_FLOW_LABEL);
-#endif
-	/* flow_hash_from_keys() sorts the addresses by value, so we have
-	 * to preserve their order in a separate data structure to treat
-	 * src and dst host addresses as independently selectable.
-	 */
+
+	// optimize for the most common case
 	if (flow_mode & CAKE_FLOW_FLOWS) {
-		flow_hash = flow_hash_from_keys(&keys);
+		host_hash = flow_hash = flow_hash_from_keys(&keys);
 	} else {
+
+/* flow_hash_from_keys() sorts the addresses by value, so we have
+ * to preserve their order in a separate data structure to treat
+ * src and dst host addresses as independently selectable.
+ */
 		host_keys = keys;
 		host_keys.ports.ports     = 0;
 		host_keys.basic.ip_proto  = 0;
@@ -317,10 +291,25 @@ cake_hash(struct cake_tin_data *q, const struct sk_buff *skb, int flow_mode)
 			};
 		}
 
-		flow_hash = flow_hash_from_keys(&host_keys);
+		switch(flow_mode) {
+		case CAKE_FLOW_SRC_IP:
+		case CAKE_FLOW_DST_IP:
+		case CAKE_FLOW_HOSTS:
+			host_hash = flow_hash = flow_hash_from_keys(&host_keys);
+			break;
+		case CAKE_FLOW_DUAL:
+		case CAKE_FLOW_DUAL_SRC:
+		case CAKE_FLOW_DUAL_DST:
+			flow_hash = flow_hash_from_keys(&keys);
+			host_hash = flow_hash_from_keys(&host_keys);
+			break;
+		default:
+			host_hash = flow_hash = flow_hash_from_keys(&keys);
+			break; /* unreachable but quiets the compiler */
+		}
 	}
-#endif
-	reduced_hash = reciprocal_scale(flow_hash, q->flows_cnt);
+
+	reduced_hash = reciprocal_scale(host_hash, q->flows_cnt);
 
 	/* set-associative hashing */
 	/* fast path if no hash collision (direct lookup succeeds) */
