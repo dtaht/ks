@@ -110,6 +110,43 @@
 static char *cake_version __attribute__((used)) = "Cake version: "
 		CAKE_VERSION;
 
+static const u8 precedence[] = {0, 0, 0, 0, 0, 0, 0, 0,
+				1, 1, 1, 1, 1, 1, 1, 1,
+				2, 2, 2, 2, 2, 2, 2, 2,
+				3, 3, 3, 3, 3, 3, 3, 3,
+				4, 4, 4, 4, 4, 4, 4, 4,
+				5, 5, 5, 5, 5, 5, 5, 5,
+				6, 6, 6, 6, 6, 6, 6, 6,
+				7, 7, 7, 7, 7, 7, 7, 7,
+				};
+static const u8 diffserv8[] = { 2, 5, 1, 2, 4, 2, 2, 2,
+				0, 2, 1, 2, 1, 2, 1, 2,
+				5, 2, 4, 2, 4, 2, 4, 2,
+				3, 2, 3, 2, 3, 2, 3, 2,
+				6, 2, 3, 2, 3, 2, 3, 2,
+				6, 2, 2, 2, 6, 2, 6, 2,
+				7, 2, 2, 2, 2, 2, 2, 2,
+				7, 2, 2, 2, 2, 2, 2, 2,
+				};
+static const u8 diffserv4[] = { 1, 2, 1, 1, 2, 1, 1, 1,
+				0, 1, 1, 1, 1, 1, 1, 1,
+				2, 1, 2, 1, 2, 1, 2, 1,
+				2, 1, 2, 1, 2, 1, 2, 1,
+				3, 1, 2, 1, 2, 1, 2, 1,
+				3, 1, 1, 1, 3, 1, 3, 1,
+				3, 1, 1, 1, 1, 1, 1, 1,
+				3, 1, 1, 1, 1, 1, 1, 1,
+				};
+static const u8 besteffort[] = {0, 0, 0, 0, 0, 0, 0, 0,
+				0, 0, 0, 0, 0, 0, 0, 0,
+				0, 0, 0, 0, 0, 0, 0, 0,
+				0, 0, 0, 0, 0, 0, 0, 0,
+				0, 0, 0, 0, 0, 0, 0, 0,
+				0, 0, 0, 0, 0, 0, 0, 0,
+				0, 0, 0, 0, 0, 0, 0, 0,
+				0, 0, 0, 0, 0, 0, 0, 0,
+				};
+
 struct cake_flow {
 	struct sk_buff	  *head;
 	struct sk_buff	  *tail;
@@ -195,7 +232,7 @@ struct cake_sched_data {
 	u16		cur_flow;
 
 	struct qdisc_watchdog watchdog;
-	u8		tin_index[64];
+	const u8	*tin_index;
 
 	/* bandwidth capacity estimate */
 	u64		last_packet_time;
@@ -883,13 +920,9 @@ static void cake_config_besteffort(struct Qdisc *sch)
 	struct cake_tin_data *b = &q->tins[0];
 	u64 rate = q->rate_bps;
 	u32 mtu = psched_mtu(qdisc_dev(sch));
-	u32 i;
 
 	q->tin_cnt = 1;
-
-	for (i = 0; i < 64; i++)
-		q->tin_index[i] = 0;
-
+	q->tin_index = besteffort;
 	cake_set_rate(b, rate, mtu, US2TIME(q->target), US2TIME(q->interval));
 	b->tin_quantum_band = 65535;
 	b->tin_quantum_prio = 65535;
@@ -906,9 +939,7 @@ static void cake_config_precedence(struct Qdisc *sch)
 	u32 i;
 
 	q->tin_cnt = 8;
-
-	for (i = 0; i < 64; i++)
-		q->tin_index[i] = min((u32)(i >> 3), (u32)(q->tin_cnt));
+	q->tin_index = precedence;
 
 	for (i = 0; i < q->tin_cnt; i++) {
 		struct cake_tin_data *b = &q->tins[i];
@@ -1000,28 +1031,7 @@ static void cake_config_diffserv8(struct Qdisc *sch)
 	q->tin_cnt = 8;
 
 	/* codepoint to class mapping */
-	for (i = 0; i < 64; i++)
-		q->tin_index[i] = 2;	/* default to best-effort */
-
-	q->tin_index[0x08] = 0;	/* CS1 */
-	q->tin_index[0x02] = 1;	/* TOS2 */
-	q->tin_index[0x18] = 3;	/* CS3 */
-	q->tin_index[0x04] = 4;	/* TOS4 */
-	q->tin_index[0x01] = 5;	/* TOS1 */
-	q->tin_index[0x10] = 5;	/* CS2 */
-	q->tin_index[0x20] = 6;	/* CS4 */
-	q->tin_index[0x28] = 6;	/* CS5 */
-	q->tin_index[0x2c] = 6;	/* VA */
-	q->tin_index[0x2e] = 6;	/* EF */
-	q->tin_index[0x30] = 7;	/* CS6 */
-	q->tin_index[0x38] = 7;	/* CS7 */
-
-	for (i = 2; i <= 6; i += 2) {
-		q->tin_index[0x08 + i] = 1;	/* AF1x */
-		q->tin_index[0x10 + i] = 4;	/* AF2x */
-		q->tin_index[0x18 + i] = 3;	/* AF3x */
-		q->tin_index[0x20 + i] = 3;	/* AF4x */
-	}
+	q->tin_index = diffserv8;
 
 	/* class characteristics */
 	for (i = 0; i < q->tin_cnt; i++) {
@@ -1061,35 +1071,10 @@ static void cake_config_diffserv4(struct Qdisc *sch)
 	u64 rate = q->rate_bps;
 	u32 mtu = psched_mtu(qdisc_dev(sch));
 	u32 quantum = 256;
-	u32 i;
 
 	q->tin_cnt = 4;
-
-	/* codepoint to class mapping */
-	for (i = 0; i < 64; i++)
-		q->tin_index[i] = 1;	/* default to best-effort */
-
-	q->tin_index[0x08] = 0;	/* CS1 */
-
-	q->tin_index[0x18] = 2;	/* CS3 */
-	q->tin_index[0x04] = 2;	/* TOS4 */
-	q->tin_index[0x01] = 2;	/* TOS1 */
-	q->tin_index[0x10] = 2;	/* CS2 */
-
-	q->tin_index[0x20] = 3;	/* CS4 */
-	q->tin_index[0x28] = 3;	/* CS5 */
-	q->tin_index[0x2c] = 3;	/* VA */
-	q->tin_index[0x2e] = 3;	/* EF */
-	q->tin_index[0x30] = 3;	/* CS6 */
-	q->tin_index[0x38] = 3;	/* CS7 */
-
-	for (i = 2; i <= 6; i += 2) {
-		q->tin_index[0x10 + i] = 2;	/* AF2x */
-		q->tin_index[0x18 + i] = 2;	/* AF3x */
-		q->tin_index[0x20 + i] = 2;	/* AF4x */
-	}
-
 	/* class characteristics */
+	q->tin_index = diffserv4;
 	cake_set_rate(&q->tins[0], rate, mtu,
 		      US2TIME(q->target), US2TIME(q->interval));
 	cake_set_rate(&q->tins[1], rate - (rate >> 4), mtu,
